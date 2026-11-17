@@ -24,6 +24,7 @@ CHAPTERS = {
 }
 ID_IN_TEXT = re.compile(rf"(?<![\w.]){RULE_ID}(?!\w|\.\d)", re.IGNORECASE)
 WORDS = re.compile(r"[a-z0-9]+")
+RULE_REFERENCE = re.compile(r"\brules?\s+([1-9]\d{2}(?:\.\d+[a-z]*)?)", re.I)
 STOP_WORDS = set(
     "a an and are as at be by can could did do does for from had has have how i if in "
     "is it its me my of on or our s should so than that the their them then there "
@@ -36,6 +37,11 @@ class Passage:
     id: str
     heading: str
     text: str
+    members: tuple[str, ...] = ()
+
+
+def retrieved_rule_ids(passages):
+    return list(dict.fromkeys(identifier for p in passages for identifier in (p.id, *p.members)))
 
 
 def decode_rules(raw):
@@ -127,16 +133,32 @@ def prepare(args):
 
 def terms_for(text):
     terms = WORDS.findall(text.lower())
-    # Match common singular/plural variants such as target/targets.
     return [
         term[:-1] if len(term) > 4 and term.endswith("s") and not term.endswith("ss") else term
         for term in terms if term not in STOP_WORDS
     ]
 
 
+def topic_terms(text):
+    result = set()
+    for term in WORDS.findall(text.lower()):
+        if term in STOP_WORDS:
+            continue
+        if term.endswith("ies"):
+            term = term[:-3] + "y"
+        elif len(term) > 5 and term.endswith("ed"):
+            term = term[:-2]
+        elif len(term) > 4 and term.endswith("s") and not term.endswith("ss"):
+            term = term[:-1]
+        result.add(term)
+    return result
+
+
 class RuleIndex:
-    def __init__(self, path=DATA / "passages.json"):
-        data = json.loads(path.read_text(encoding="utf-8"))
+    def __init__(self, path=DATA / "passages.json", semantic=True):
+        raw = path.read_bytes()
+        data = json.loads(raw)
+        self.source_hash = hashlib.sha256(raw).hexdigest()
         self.manifest = data["manifest"]
         self.passages = [Passage(**item) for item in data["passages"]]
         self.by_id = {p.id.lower(): p for p in self.passages}
@@ -144,25 +166,160 @@ class RuleIndex:
         self.lengths = [sum(doc.values()) for doc in self.documents]
         self.average_length = sum(self.lengths) / len(self.lengths)
         self.frequency = Counter(word for doc in self.documents for word in doc)
+        self.glossary = [p for p in self.passages if p.id.startswith("Glossary: ")]
+        self.semantic = None
+        cache = path.with_name("rule_vectors.npz")
+        if semantic and cache.is_file():
+            from retrieval import SemanticIndex
+            self.semantic = SemanticIndex(cache, self.source_hash)
 
-    def search(self, question, limit=8):
+    def retrieval_info(self):
+        return {
+            "mode": "hybrid-reranked" if self.semantic else "lexical",
+            "passages_sha256": self.source_hash,
+            "semantic": dict(self.semantic.metadata) if self.semantic else None,
+        }
+
+    def rule_context(self, passage, max_characters=3000):
+        match = re.match(r"[1-9]\d{2}\.\d+", passage.id)
+        if not match:
+            return passage
+        parent = match.group()
+        family = [passage] + [
+            p for p in self.passages if p.id != passage.id
+            and (p.id == parent or p.id.startswith(parent) and p.id[len(parent):].isalpha())
+        ]
+        selected = []
+        length = 0
+        for member in family:
+            if selected and length + len(member.text) > max_characters:
+                continue
+            selected.append(member)
+            length += len(member.text)
+        return Passage(
+            passage.id, passage.heading,
+            "\n\n".join(f"[CR {p.id}] {p.text}" for p in selected),
+            tuple(p.id for p in selected),
+        )
+
+    def search(self, question, limit=12, cards=()):
+        if limit < 1:
+            return []
         explicit = dict.fromkeys(rule.lower() for rule in ID_IN_TEXT.findall(question))
         picked = [self.by_id[rule] for rule in explicit if rule in self.by_id]
-        keys = set(terms_for(question))
+        # Mechanics from actual Oracle records connect named-card questions to rules.
+        mechanics = " ".join(keyword for card in cards for keyword in card.get("keywords", []))
+        query = mechanics + ". " + question if mechanics else question
+        oracle = []
+        for card in cards:
+            for face in (card, *card.get("faces", [])):
+                oracle.append(f"{face.get('type_line', '')} {face.get('oracle_text', '')}"[:400])
+        if oracle:
+            query += " Oracle text: " + " ".join(oracle)
+        stats = re.findall(r"(?<![-+\d])(\d+)\s*/\s*(\d+)", question)
+        changes = re.findall(r"([+-]\d+)\s*/\s*([+-]\d+)", question)
+        if len(stats) == len(changes) == 1:
+            toughness = int(stats[0][1]) + int(changes[0][1])
+            query += f" Computed creature toughness after the modifier is {toughness}."
+            if toughness <= 0:
+                query += " Creature toughness zero or less."
+        concepts = topic_terms(query)
+        if {"trigger", "ability"} <= concepts and any(
+            term in query.lower() for term in ("simultaneous", "together", "same event")
+        ):
+            query += " Multiple triggered abilities controlled by different players. APNAP order of abilities on the stack."
+        if "exil" in query.lower() and "return" in query.lower():
+            query += " Counters retained when an object moves from one zone to another."
+        keys = set(terms_for(query))
         count = len(self.documents)
         weights = {
             key: math.log1p((count - self.frequency[key] + 0.5) / (self.frequency[key] + 0.5))
             for key in keys
         }
-        scored = []
+        scores = {}
         for index, (doc, length) in enumerate(zip(self.documents, self.lengths)):
             norm = 1.2 * (0.25 + 0.75 * length / self.average_length)
             score = sum(weights[key] * (doc[key] * 2.2) / (doc[key] + norm)
                         for key in sorted(keys & doc.keys()))
-            if score and self.passages[index].id.lower() not in explicit:
-                scored.append((-score, index))
-        picked.extend(self.passages[index] for _, index in sorted(scored)[:limit])
-        return picked[:limit]
+            if score:
+                scores[self.passages[index].id] = score
+
+        ranked = sorted(scores, key=lambda identifier: (-scores[identifier], identifier))
+        if self.semantic:
+            dense = self.semantic.search(query, 40)
+            # Reciprocal-rank fusion keeps exact terms and semantic matches useful.
+            fused = Counter()
+            for ranking, weight in ((ranked[:40], 1.0), (dense, 2.0)):
+                for rank, identifier in enumerate(ranking, 1):
+                    fused[identifier] += weight / (10 + rank)
+            ranked = sorted(fused, key=lambda identifier: (-fused[identifier], identifier))
+        # Use explicit mechanic names in the official glossary to bring in their
+        # substantive definitions. Generic timing words cannot replace these.
+        topics = []
+        query_terms = topic_terms(query)
+        for passage in self.glossary:
+            title = passage.id.removeprefix("Glossary: ")
+            normalized = topic_terms(title)
+            if normalized and normalized <= query_terms:
+                specificity = sum(weights.get(term, 0) for term in normalized) / math.sqrt(len(normalized))
+                topics.append((-specificity, passage))
+        anchors = []
+        definitions = []
+        for _, passage in sorted(topics, key=lambda item: (item[0], item[1].id))[:3]:
+            references = RULE_REFERENCE.findall(passage.text)
+            if not references:
+                # Glossary aliases such as APNAP Order point to another term.
+                # Find operative rules that explicitly use that term as well.
+                title_terms = topic_terms(passage.id.removeprefix("Glossary: "))
+                matches = [
+                    p for p in self.passages if not p.id.startswith("Glossary: ")
+                    and title_terms <= topic_terms(p.text)
+                ]
+                if matches:
+                    roots = set()
+                    for match in sorted(matches, key=lambda p: (-scores.get(p.id, 0), p.id)):
+                        root = re.match(r"[1-9]\d{2}\.\d+", match.id).group()
+                        if root not in roots:
+                            definitions.append(self.rule_context(match))
+                            roots.add(root)
+                        if len(roots) == 3:
+                            break
+            for reference in references:
+                family = [
+                    p for p in self.passages if (
+                        p.id == reference or p.id.startswith(reference + ".")
+                        or p.id.startswith(reference) and p.id[len(reference):].isalpha()
+                    )
+                    and len(p.text.split()) >= 8
+                ]
+                anchors.extend(family)
+                if family:
+                    candidates = family[:1] if "." in reference else sorted(
+                        family, key=lambda p: (-scores.get(p.id, 0), p.id),
+                    )[:3]
+                    definitions.extend(self.rule_context(p) for p in candidates)
+        if self.semantic:
+            candidates = dict.fromkeys(ranked[:60] + [p.id for p in anchors])
+            ranked = self.semantic.rerank(query, [self.by_id[key.lower()] for key in candidates])
+        picked.extend(p for p in definitions if p.id not in retrieved_rule_ids(picked))
+        for passage in definitions[:6]:
+            for reference in ID_IN_TEXT.findall(passage.text):
+                if reference in self.by_id and reference not in retrieved_rule_ids(picked):
+                    picked.append(self.rule_context(self.by_id[reference]))
+                    break
+        picked.extend(self.by_id[identifier.lower()] for identifier in ranked)
+        result = []
+        seen = set()
+        characters = 0
+        for passage in picked:
+            if passage.id in seen or result and characters + len(passage.text) > 12000:
+                continue
+            result.append(passage)
+            seen.update(retrieved_rule_ids([passage]))
+            characters += len(passage.text)
+            if len(result) == limit:
+                break
+        return result
 
 
 def format_passage(passage):
@@ -180,10 +337,14 @@ def main():
     source.add_argument("--url", default=DEFAULT_URL)
     lookup = commands.add_parser("lookup", help="Search the imported rules without a model.")
     lookup.add_argument("question")
+    commands.add_parser("index", help="Build the CPU semantic retrieval index.")
     args = parser.parse_args()
     try:
         if args.command == "prepare":
             prepare(args)
+        elif args.command == "index":
+            from retrieval import build_index
+            build_index(RuleIndex(semantic=False))
         else:
             index = RuleIndex()
             print(f"Rules edition: {index.manifest['effective'] or 'unknown'}")

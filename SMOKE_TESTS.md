@@ -42,11 +42,19 @@ This loads the base and adapter together once and disables the adapter for each 
 
 - `correct_choice` means the generated answer selected the expected letter.
 - `wrong_choice` means it selected another letter.
-- `unparsed` means the response did not begin with the requested `ANSWER: A` format, so its choice needs manual review.
+- `unparsed` means the response did not begin with a recognizable single choice. The grader accepts `ANSWER: A`, a standalone `A`, and a first line such as `A. Explanation`. Other formats need manual review.
 
 Review explanations against the expected answer, even when the selected letter matches. Check for contradictions, incorrect numbers, missing conditions and unsupported citations. The automatic score covers the answer choice. Explanation review remains marked `pending` in the JSON.
 
-The suite exercises the application's normal question-answering path, including retrieved rule passages, card Oracle text, mana guidance and computed cost totals. Its score measures the model with those tools available. Expected choices and expected explanations are used for scoring and reports. They are excluded from the model's prompt. Choice text is shown as part of each multiple-choice question.
+The suite exercises the application's normal question-answering path, including retrieved rule passages, card Oracle text, mana guidance and computed cost totals. Cases select cards explicitly through their `cards` field, so ordinary game phrases such as "the command zone" do not accidentally select a card with that name. Its score measures the model with those tools available. Expected choices and expected explanations are used for scoring and reports. They are excluded from the model's prompt. Choice text is shown as part of each multiple-choice question.
+
+To apply a newer grader to saved answers, rescore into a separate report folder.
+
+```powershell
+& $python .\smoke_tests.py --rescore runs/post-training-smoke/results.json --output runs/post-training-smoke-rescored
+```
+
+Rescoring preserves the generated answers and uses no model or GPU. It changes the interpretation of saved answer formats.
 
 The expected rulings target the November 6, 2026 Comprehensive Rules and your November 17, 2026 Scryfall snapshot. Review the answers when replacing either source. A retrieved or cited rule number alone does not establish that the explanation is correct.
 

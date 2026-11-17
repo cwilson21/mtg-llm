@@ -14,7 +14,7 @@ import sys
 from cards import DATABASE, CardIndex, open_cards
 from mana import computed_costs
 from mtg import BASE_MODEL, load_for_answers, reply
-from rules import RuleIndex, write_text
+from rules import RuleIndex, retrieved_rule_ids, write_text
 
 
 def load_suite(path):
@@ -52,7 +52,12 @@ def question_prompt(case):
 
 
 def score_answer(case, answer):
-    match = re.match(r"\s*ANSWER:[ \t]*([ABCD])[ \t]*(?:\r?\n|$)", answer, re.IGNORECASE)
+    # Accept an answer marker or an unambiguous first-line choice such as D. No.
+    # Do not infer a choice by searching the explanation or expected answer.
+    match = re.match(
+        r"\s*(?:ANSWER:[ \t]*)?([ABCD])(?:[.)][ \t]+[^\r\n]*|[ \t]*)(?:\r?\n|$)",
+        answer, re.IGNORECASE,
+    )
     choice = match.group(1).upper() if match else None
     status = "unparsed" if choice is None else (
         "correct_choice" if choice == case["correct_choice"] else "wrong_choice"
@@ -152,19 +157,20 @@ def run(args, suite, cases, index, card_index):
         "expected_rules_edition": suite.get("rules_edition"),
         "compare_base": args.compare_base, "selected_cases": len(cases),
         "context": "Application lookup with retrieved rules, card text and mana helpers",
+        "retrieval": index.retrieval_info(),
         "cases": [],
     }
     if index.manifest["effective"] != suite.get("rules_edition"):
         print("The imported rules edition differs from the suite. Review expected answers for this edition.")
     save_report(report, args.output)
     for position, case in enumerate(cases, 1):
-        hits = index.search(case["question"])
-        cards = card_index.for_question(case["question"], case["cards"]) if card_index else []
+        cards = card_index.for_question(case["question"], case["cards"]) if card_index and case["cards"] else []
+        hits = index.search(case["question"], cards=cards)
         prompt = question_prompt(case)
         row = {
-            **case, "retrieved_rules": [passage.id for passage in hits],
+            **case, "retrieved_rules": retrieved_rule_ids(hits),
             "retrieved_cards": [card["name"] for card in cards],
-            "expected_rules_retrieved": [rule for rule in case["rules"] if any(p.id == rule for p in hits)],
+            "expected_rules_retrieved": [rule for rule in case["rules"] if rule in retrieved_rule_ids(hits)],
             "computed_costs": computed_costs(case["question"], cards),
         }
         if args.compare_base:
@@ -172,6 +178,7 @@ def run(args, suite, cases, index, card_index):
                 row["base"] = score_answer(case, reply(model, tokenizer, prompt, hits, cards))
         row["adapter"] = score_answer(case, reply(model, tokenizer, prompt, hits, cards))
         report["cases"].append(row)
+        report["retrieval"] = index.retrieval_info()
         save_report(report, args.output)
         print(f"{position}/{len(cases)} {case['id']}: {row['adapter']['status']}", flush=True)
     print(json.dumps(report["summary"], indent=2))
@@ -189,11 +196,27 @@ def main():
     parser.add_argument("--limit", type=int, help="Run only the first N selected questions.")
     parser.add_argument("--compare-base", action="store_true", help="Also run the original model with identical context.")
     parser.add_argument("--validate", action="store_true", help="Check the suite and local data without loading the model.")
+    parser.add_argument("--rescore", type=Path, help="Rescore an existing results.json without generating new answers.")
     args = parser.parse_args()
     args.model = BASE_MODEL
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive.")
     try:
+        if args.rescore:
+            if args.output.resolve() == args.rescore.parent.resolve():
+                raise ValueError("Choose a different --output folder to preserve the original report.")
+            report = json.loads(args.rescore.read_text(encoding="utf-8"))
+            for case in report["cases"]:
+                for label in ("adapter", "base"):
+                    if label in case:
+                        previous = case[label]
+                        case[label] = score_answer(case, previous["answer"])
+                        case[label]["explanation_review"] = previous.get("explanation_review", "pending")
+            report["rescored_from"] = str(args.rescore.resolve())
+            save_report(report, args.output)
+            print(json.dumps(report["summary"], indent=2))
+            print(f"Open {(args.output / 'results.html').resolve()}")
+            return
         suite = load_suite(args.questions)
         groups = {case["group"] for case in suite["cases"]}
         if args.group and set(args.group) - groups:

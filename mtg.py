@@ -3,6 +3,7 @@
 import argparse
 from contextlib import nullcontext
 import hashlib
+import inspect
 from itertools import batched
 import json
 import os
@@ -12,7 +13,7 @@ import sys
 
 from cards import DATABASE, CardIndex, format_card, open_cards
 from mana import MANA_GUIDE, computed_costs
-from rules import DATA, RuleIndex, format_passage, write_text
+from rules import DATA, RuleIndex, format_passage, retrieved_rule_ids, write_text
 
 
 os.environ.setdefault("HF_HOME", str(Path(".cache/huggingface").resolve()))
@@ -103,13 +104,22 @@ def train(args):
     model, tokenizer = load_base(base_model, dtype, parent["revision"] if parent else None)
     revision = model.config._commit_hash
     model.config.use_cache = False
-    token_ids = tokenizer(raw.decode("utf-8"), add_special_tokens=False, verbose=False)["input_ids"]
-    token_ids.append(tokenizer.eos_token_id)
+    evaluation = None
+    supervised_record = None
+    if args.command == "sft":
+        from supervised import prepare_datasets
+        blocks, evaluation, supervised_record = prepare_datasets(args, index, tokenizer, answer_messages)
+    token_ids = []
+    if args.command == "train":
+        token_ids = tokenizer(raw.decode("utf-8"), add_special_tokens=False, verbose=False)["input_ids"]
+        token_ids.append(tokenizer.eos_token_id)
     rule_blocks = token_blocks(token_ids, args.length)
     mana_tokens = tokenizer(MANA_GUIDE, add_special_tokens=False, verbose=False)["input_ids"]
     mana_tokens.append(tokenizer.eos_token_id)
     mana_blocks = token_blocks(mana_tokens, args.length)
     card_manifest = None
+    if supervised_record:
+        card_manifest = supervised_record.get("cards") or (parent or {}).get("cards")
     card_tokens = 0
     if args.with_cards:
         with open_cards() as conn:
@@ -128,12 +138,16 @@ def train(args):
         replay_count = max(len(rule_blocks), (len(card_blocks) + 2) // 3)
         blocks = Blocks(card_blocks + [rule_blocks[i % len(rule_blocks)] for i in range(replay_count)])
         print(f"Card stage: {len(card_blocks):,} card blocks and {replay_count:,} rules blocks")
-    else:
+    elif args.command == "train":
         blocks = Blocks(rule_blocks)
     # Repeat this concise reference throughout either training stage.
-    mana_replays = max(len(mana_blocks), (len(blocks) + 19) // 20)
-    blocks.blocks.extend(mana_blocks[i % len(mana_blocks)] for i in range(mana_replays))
-    print(f"{len(token_ids):,} source rules tokens; {card_tokens:,} source card tokens")
+    if args.command == "train":
+        mana_replays = max(len(mana_blocks), (len(blocks) + 19) // 20)
+        blocks.blocks.extend(mana_blocks[i % len(mana_blocks)] for i in range(mana_replays))
+    if args.command == "train":
+        print(f"{len(token_ids):,} source rules tokens; {card_tokens:,} source card tokens")
+    else:
+        print(f"Supervised assistant-answer tokens: {supervised_record['assistant_tokens']:,}")
     if parent:
         model = PeftModel.from_pretrained(model, args.from_adapter, is_trainable=True)
     else:
@@ -145,10 +159,11 @@ def train(args):
     settings = TrainingArguments(
         output_dir=str(args.output),
         per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
         gradient_accumulation_steps=4,
         num_train_epochs=args.epochs,
         max_steps=args.steps,
-        learning_rate=5e-5,
+        learning_rate=args.learning_rate,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         gradient_checkpointing=True,
@@ -162,19 +177,33 @@ def train(args):
         save_strategy="no",
         report_to="none",
         seed=42,
+        eval_strategy="epoch" if evaluation else "no",
     )
+    if args.command == "sft":
+        from transformers import DataCollatorForSeq2Seq
+        collator = DataCollatorForSeq2Seq(tokenizer, label_pad_token_id=-100)
+    else:
+        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     trainer = Trainer(
         model=model, args=settings, train_dataset=blocks, processing_class=tokenizer,
-        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        data_collator=collator, eval_dataset=evaluation,
     )
     trainer.train()
     trainer.save_model(str(args.output))
     write_text(args.output / "run.json", json.dumps({
         "base_model": base_model, "revision": revision, "rules": index.manifest,
         "cards": card_manifest, "parent_adapter": str(args.from_adapter) if parent else None,
-        "tokens": len(token_ids) + card_tokens + len(mana_tokens), "sequence_length": args.length,
+        "tokens": (
+            sum(len(row["input_ids"]) for row in blocks) if supervised_record
+            else len(token_ids) + card_tokens + len(mana_tokens)
+        ),
+        "sequence_length": args.length,
         "mana_reference_sha256": hashlib.sha256(MANA_GUIDE.encode("utf-8")).hexdigest(),
         "optimizer_steps": trainer.state.global_step,
+        "training_mode": args.command, "supervised": supervised_record,
+        "validation_metrics": next(
+            (entry for entry in reversed(trainer.state.log_history) if "eval_loss" in entry), None,
+        ),
     }, indent=2))
     print(f"Adapter saved to {args.output.resolve()}")
 
@@ -193,9 +222,7 @@ def load_for_answers(args):
     return model.to(device).eval(), tokenizer, record
 
 
-def reply(model, tokenizer, question, hits, cards):
-    import torch
-
+def answer_messages(question, hits, cards):
     excerpts = "\n\n".join(map(format_passage, hits)) or "(No matching passages.)"
     messages = [
         {"role": "system", "content": SYSTEM + "\n\n" + MANA_GUIDE},
@@ -210,13 +237,26 @@ def reply(model, tokenizer, question, hits, cards):
                 "Verified cost calculations. Use these totals when answering.\n"
                 + "\n".join(calculations) + "\n\n" + messages[-1]["content"]
             )
-    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return messages
+
+
+def reply(model, tokenizer, question, hits, cards):
+    import torch
+
+    prompt = tokenizer.apply_chat_template(
+        answer_messages(question, hits, cards), tokenize=False, add_generation_prompt=True,
+    )
     inputs = tokenizer(
         prompt, return_tensors="pt", add_special_tokens=False,
     ).to(model.device)
+    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    generation_options = {"use_cache": True}
+    if "logits_to_keep" in inspect.signature(base.forward).parameters:
+        generation_options["logits_to_keep"] = 1
     with torch.inference_mode():
         result = model.generate(
             **inputs, max_new_tokens=240, do_sample=False, pad_token_id=tokenizer.pad_token_id,
+            **generation_options,
         )
     return tokenizer.decode(result[0, inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
 
@@ -244,12 +284,12 @@ def run_answers(args, card_index):
     ):
         print("The adapter's training snapshot differs from the available card lookup data.")
     if cases is None:
-        hits = index.search(args.question)
+        hits = index.search(args.question, cards=cards)
         calculations = computed_costs(args.question, cards)
         if calculations:
             print("\n".join(calculations), "\n")
         print(reply(model, tokenizer, args.question, hits, cards))
-        print("\nRetrieved references:", ", ".join(p.id for p in hits) or "none")
+        print("\nRetrieved references:", ", ".join(retrieved_rule_ids(hits)) or "none")
         if cards:
             print("Scryfall cards:", ", ".join(card["name"] for card in cards))
             print("Card snapshot:", card_index.manifest["snapshot"])
@@ -257,12 +297,12 @@ def run_answers(args, card_index):
         return
     rows = []
     for case in cases:
-        hits = index.search(case["question"])
         cards = card_index.for_question(case["question"]) if card_index else []
+        hits = index.search(case["question"], cards=cards)
         with model.disable_adapter() if record else nullcontext():
             base = reply(model, tokenizer, case["question"], hits, cards)
         tuned = reply(model, tokenizer, case["question"], hits, cards) if record else None
-        retrieved = [p.id for p in hits]
+        retrieved = retrieved_rule_ids(hits)
         expected = case["rules"]
         rows.append({
             **case, "retrieved": retrieved,
@@ -276,6 +316,7 @@ def run_answers(args, card_index):
     write_text(args.report, json.dumps({
         "rules_edition": index.manifest["effective"],
         "card_snapshot": card_index.manifest if card_index else None,
+        "retrieval": index.retrieval_info(),
         "base_model": record["base_model"] if record else args.model,
         "adapter": str(args.adapter) if record else None,
         "cases": rows,
@@ -295,25 +336,40 @@ def main():
     training.add_argument("--output", type=Path, default=Path("runs/mtg-rules"))
     training.add_argument("--with-cards", action="store_true", help="Mix in Scryfall cards prepared by cards.py.")
     training.add_argument("--from-adapter", type=Path, help="Continue training from an existing adapter.")
+    training.add_argument("--learning-rate", type=float, default=5e-5)
+    sft = commands.add_parser("sft", help="Supervised training on reviewed questions and answers.")
+    sft.add_argument("--train-file", type=Path, default=Path("qa/train.jsonl"))
+    sft.add_argument("--eval-file", type=Path, default=Path("qa/validation.jsonl"))
+    sft.add_argument("--validate", action="store_true", help="Validate datasets without loading a model.")
+    sft.add_argument("--from-adapter", type=Path)
+    sft.add_argument("--output", type=Path, default=Path("runs/qwen3-sft"))
+    sft.add_argument("--length", type=int, default=2048, choices=(512, 1024, 2048))
+    sft.add_argument("--epochs", type=int, default=1)
+    sft.add_argument("--steps", type=int, default=-1)
+    sft.add_argument("--learning-rate", type=float, default=2e-5)
+    sft.set_defaults(with_cards=False)
     ask = commands.add_parser("ask", help="Ask a rules question with retrieved passages.")
     ask.add_argument("question")
     ask.add_argument("--card", action="append", default=[], help="Include an exact card or face name. Repeat as needed.")
     evaluation = commands.add_parser("evaluate", help="Generate answers for the included evaluation scenarios.")
     evaluation.add_argument("--report", type=Path, default=Path("runs/evaluation.json"))
-    for cmd in (training, ask, evaluation):
+    for cmd in (training, sft, ask, evaluation):
         cmd.add_argument("--model", default=BASE_MODEL)
         cmd.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     for cmd in (ask, evaluation):
         cmd.add_argument("--adapter", type=Path)
     args = parser.parse_args()
-    if args.command == "train" and (args.epochs < 1 or args.steps == 0 or args.steps < -1):
+    if args.command in {"train", "sft"} and (args.epochs < 1 or args.steps == 0 or args.steps < -1 or args.learning_rate <= 0):
         parser.error("Use --epochs >= 1 and either --steps -1 or a positive step count.")
-    if args.command == "train" and args.from_adapter and args.model != BASE_MODEL:
+    if args.command in {"train", "sft"} and args.from_adapter and args.model != BASE_MODEL:
         parser.error("--from-adapter supplies the base model. Omit --model.")
     try:
         if args.command == "doctor":
             doctor()
-        elif args.command == "train":
+        elif args.command == "sft" and args.validate:
+            from supervised import load_datasets
+            load_datasets(args.train_file, args.eval_file, RuleIndex())
+        elif args.command in {"train", "sft"}:
             train(args)
         else:
             answer(args)
