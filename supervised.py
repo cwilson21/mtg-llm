@@ -35,6 +35,8 @@ def read_examples(path, index):
         row.setdefault("cards", [])
         if not isinstance(row["cards"], list) or not all(isinstance(name, str) for name in row["cards"]):
             raise ValueError(f"{row['id']}: cards must be a list of names.")
+        if "group" in row and (not isinstance(row["group"], str) or not row["group"].strip()):
+            raise ValueError(f"{row['id']}: group must be a nonempty string when supplied.")
         rows.append(row)
     if not rows:
         raise ValueError(f"{path} contains no examples.")
@@ -49,13 +51,18 @@ def load_datasets(train_file, eval_file, index):
     questions = [normalize_question(row["question"]) for row in all_rows]
     if len(set(ids)) != len(ids) or len(set(questions)) != len(questions):
         raise ValueError("Training and validation must have unique IDs and distinct questions.")
+    train_groups = {row["group"] for row in training if "group" in row}
+    validation_groups = {row["group"] for row in validation if "group" in row}
+    if train_groups & validation_groups:
+        raise ValueError("A scenario group appears in both training and validation.")
     reserved = set()
     root = Path(__file__).parent
     for name in ("smoke_questions.json", "evaluation.json", "evaluation_cards.json"):
         data = json.loads((root / name).read_text(encoding="utf-8"))
         cases = data["cases"] if isinstance(data, dict) else data
         reserved.update(normalize_question(case["question"]) for case in cases)
-    if reserved & set(questions):
+    if any(question == heldout or question.startswith(heldout + " ")
+           for question in questions for heldout in reserved):
         raise ValueError("A training or validation question duplicates a reserved evaluation question.")
     if any(row["cards"] for row in all_rows):
         if not DATABASE.is_file():

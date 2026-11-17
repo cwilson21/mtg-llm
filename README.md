@@ -104,6 +104,8 @@ Choose a fresh output directory for every run. The current trainer saves the ada
 
 ## Supervised question-and-answer training
 
+An [expanded second curriculum](qa/ROUND2.md) is available with 184 training and 54 validation examples. It adds paired scenarios and balanced multiple-choice targets. Use its instructions for the next controlled training pass.
+
 Use the supervised stage to train rule application and answer style after the corpus stage.
 
 ```bash
@@ -119,7 +121,7 @@ Training examples are JSONL records in `qa/train.jsonl` and `qa/validation.jsonl
 
 Each training prompt includes the example's supporting rule passages and selected cards. Only assistant-answer and end-of-message tokens contribute to the supervised loss. User prompts and source passages are masked. Evaluation never receives an expected answer or its reference list as retrieval input.
 
-The command checks that training and validation have distinct IDs and questions, that citations and card names resolve, and that no question duplicates a reserved smoke or evaluation question. Complete examples must fit the chosen `--length`; an overlong example produces an error without truncating its answer.
+The command checks that training and validation have distinct IDs and questions, that citations and card names resolve, and that no question duplicates a reserved smoke or evaluation question. Reserved-question checks also cover appended answer choices. Optional scenario groups must remain in a single split. Complete examples must fit the chosen `--length`; an overlong example produces an error without truncating its answer.
 
 Defaults are one epoch, learning rate `2e-5`, sequence length 2048, and batch size 1. Use `--learning-rate` and `--length` to change them. Run metadata records data hashes, supervised token counts and validation loss. A three-step CUDA run continuing the trained Qwen3-4B adapter completed successfully. Full supervised ruling-accuracy validation is pending.
 
@@ -166,6 +168,6 @@ The corpus stage uses next-token prediction over rulebook and card text. The sup
 python -m unittest discover -s tests -v
 ```
 
-Nine regression tests cover answer parsing, complete assistant-only labels, dataset overlap, reserved evaluation questions, semantic cache validation, chunk deduplication, subrule provenance, cached lookup behavior and memory-conscious generation.
+Eleven regression tests cover answer parsing, complete assistant-only labels, dataset and scenario-group overlap, reserved evaluation questions with appended choices, semantic cache validation, chunk deduplication, subrule provenance, cached lookup behavior and memory-conscious generation.
 
 On the existing 30-question development suite, expected supporting references present in retrieved context increased from 29 of 50 to 40 of 50. The earlier search returned eight individual passages. The new search allows up to twelve bounded blocks, including related subrules. This measures evidence coverage on the development questions. Full answer accuracy after supervised training still needs a new evaluation run. The three-step supervised smoke adapter still answered a zero-toughness question incorrectly despite receiving the relevant rules.

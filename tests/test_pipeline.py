@@ -64,6 +64,29 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "reserved evaluation"):
                 load_datasets(*paths, SimpleNamespace(by_id={"100.1": object()}))
 
+    def test_scenario_groups_cannot_span_training_and_validation(self):
+        with TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("train.jsonl", "val.jsonl")]
+            for number, path in enumerate(paths):
+                row = {"id": str(number), "group": "same-scenario", "question": f"Variant number {number}?",
+                       "answer": "Answer [CR 100.1]", "rules": ["100.1"], "cards": []}
+                path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "scenario group"):
+                load_datasets(*paths, SimpleNamespace(by_id={"100.1": object()}))
+
+    def test_reserved_question_is_rejected_after_choices_are_appended(self):
+        root = Path(__file__).resolve().parents[1]
+        reserved = json.loads((root / "smoke_questions.json").read_text(encoding="utf-8"))["cases"][0]
+        with TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("train.jsonl", "val.jsonl")]
+            for number, path in enumerate(paths):
+                question = reserved["question"] + "\nA. First choice\nB. Second choice" if not number else "Unrelated question?"
+                row = {"id": str(number), "question": question,
+                       "answer": "Answer [CR 100.1]", "rules": ["100.1"], "cards": []}
+                path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "reserved evaluation"):
+                load_datasets(*paths, SimpleNamespace(by_id={"100.1": object()}))
+
     def test_explicit_rule_reference_is_first_with_lexical_fallback(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "passages.json"
