@@ -1,0 +1,15 @@
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+data/
+runs/
+*.log
+.env
+.env.*
+!.env.example
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.jsonl.gz

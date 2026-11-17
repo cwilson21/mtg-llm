@@ -1,0 +1,62 @@
+[
+  {
+    "id": "priority-and-stack",
+    "question": "There are two spells on the stack. In a two-player game, both players pass priority in succession. Do both spells resolve at once?",
+    "rules": ["117.4", "117.3b"],
+    "reference_answer": "Only the top spell resolves. The active player receives priority afterward. The lower spell still needs another round of consecutive passes."
+  },
+  {
+    "id": "only-target-illegal",
+    "question": "An instant says 'Destroy target creature. Draw a card.' Its only target leaves the battlefield before the instant would resolve. Does the instant's controller draw a card?",
+    "rules": ["608.2b"],
+    "reference_answer": "No. The only target is illegal, so the instant fails to resolve and its controller does not draw."
+  },
+  {
+    "id": "one-legal-target",
+    "question": "A spell says 'Tap target artifact and untap target creature.' The artifact leaves the battlefield in response. The creature is still tapped and a legal target. What happens?",
+    "rules": ["608.2b"],
+    "reference_answer": "The spell resolves and untaps the creature. Its instruction to tap the illegal artifact target has no effect."
+  },
+  {
+    "id": "indestructible-zero-toughness",
+    "question": "A 2/2 creature with indestructible gets -2/-2 until end of turn. When state-based actions are checked, where does it go?",
+    "rules": ["704.5f", "702.12b"],
+    "reference_answer": "It goes to its owner's graveyard for having zero toughness. This state-based action does not destroy the creature, so indestructible does not prevent it."
+  },
+  {
+    "id": "trample-indestructible-blocker",
+    "question": "A 6/6 with trample attacks a player and is blocked by one 2/2 with indestructible. There is no marked damage or other effect. What's the most damage the attacker can assign to the defending player?",
+    "rules": ["702.19b", "702.12b"],
+    "reference_answer": "Four. Assign at least two to the blocker first. Indestructible prevents destruction from lethal damage, but does not change the amount considered lethal for assigning trample damage."
+  },
+  {
+    "id": "simultaneous-triggers",
+    "question": "In a two-player game, a creature enters during Alice's turn and causes one ordinary enters-the-battlefield ability controlled by each player to trigger. Which of those two abilities resolves first if both players pass without acting?",
+    "rules": ["603.3b", "117.4"],
+    "reference_answer": "The nonactive player's ability resolves first. Alice puts hers on the stack first, then the other player puts theirs on top."
+  },
+  {
+    "id": "commander-dies",
+    "question": "My commander is destroyed and there are no replacement effects. I want it back in the command zone. Did it enter the graveyard, and can an ability trigger from it dying?",
+    "rules": ["903.9a", "700.4"],
+    "reference_answer": "Yes to both. It moves from the battlefield to the graveyard and dies. Its owner may move it from the graveyard to the command zone when state-based actions are checked."
+  },
+  {
+    "id": "commander-bounce",
+    "question": "A spell would return my commander from the battlefield to my hand. Can I send it to the command zone before it touches my hand?",
+    "rules": ["903.9b"],
+    "reference_answer": "Yes. The owner may use the commander replacement effect to move it directly to the command zone instead of putting it into their hand."
+  },
+  {
+    "id": "zone-changes-and-counters",
+    "question": "A nontoken creature with a +1/+1 counter is exiled and immediately returned to the battlefield. No effect gives it new counters. Will it still have that counter?",
+    "rules": ["122.2", "400.7"],
+    "reference_answer": "No. Its old counter ceases to exist when it changes zones. The returned permanent is a new object."
+  },
+  {
+    "id": "empty-library",
+    "question": "A player draws their last card. The same spell then tells them to draw one more. When do they lose?",
+    "rules": ["704.5b", "704.3"],
+    "reference_answer": "They lose the next time state-based actions are checked, after the spell finishes resolving. Drawing the last card was legal. The failed attempt to draw the next card causes the loss."
+  }
+]

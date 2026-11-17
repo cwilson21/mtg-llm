@@ -1,0 +1,50 @@
+[
+  {
+    "id": "bolt-indestructible",
+    "question": "Lightning Bolt resolves targeting a Darksteel Myr with no other effects applying. What happens to the Myr?",
+    "rules": ["702.12b", "704.5g"],
+    "reference_answer": "Lightning Bolt deals 3 damage to Darksteel Myr. The 0/1 Myr has indestructible and remains on the battlefield despite lethal damage."
+  },
+  {
+    "id": "path-target-disappears",
+    "question": "Path to Exile targets a creature, but that creature leaves the battlefield before resolution. Does its controller get to search for a basic land?",
+    "rules": ["608.2b"],
+    "reference_answer": "No. Path to Exile's only target is illegal, so it does not resolve. The search instruction is not performed."
+  },
+  {
+    "id": "blood-moon-dark-depths",
+    "question": "While Blood Moon is on the battlefield, Dark Depths enters. How many ice counters does it enter with? Assume no other effects.",
+    "rules": ["305.7", "614.12"],
+    "reference_answer": "Zero. Blood Moon makes Dark Depths a Mountain and removes its printed abilities. When determining its enters-with-counters replacement effect, account for Blood Moon's continuous effect. The replacement effect does not apply."
+  },
+  {
+    "id": "split-card-faces",
+    "question": "What does each half of Fire // Ice do? Include the targeting restrictions.",
+    "rules": [],
+    "reference_answer": "Fire deals 2 damage divided as its controller chooses among one or two targets. Ice taps target permanent and its controller draws a card. Here 'its controller' refers to the controller of the Ice spell."
+  },
+  {
+    "id": "mana-colors-and-lands",
+    "question": "Which colors do {G}, {W}, {U}, {B}, and {R} represent, and which corresponding basic land types produce them?",
+    "rules": ["107.4a", "305.6"],
+    "reference_answer": "G is green from Forest, W is white from Plains, U is blue from Island, B is black from Swamp, and R is red from Mountain."
+  },
+  {
+    "id": "generic-payment",
+    "question": "Can I pay a {2}{G} cost with one white mana, one colorless mana and one green mana? What is its mana value?",
+    "rules": ["107.4a", "107.4b", "202.3"],
+    "reference_answer": "Yes. White and colorless pay the two generic mana, and green pays the green requirement. The mana value is three."
+  },
+  {
+    "id": "ballista-mana-value",
+    "question": "I cast Walking Ballista with X=3. How much generic mana is in its mana cost, what is its mana value on the stack, and what is its mana value in my hand?",
+    "rules": ["107.3a", "107.4b", "202.3e"],
+    "reference_answer": "Its cost is {X}{X}. Choosing X=3 requires six generic mana. Its mana value is six on the stack and zero in hand."
+  },
+  {
+    "id": "colorless-mana",
+    "question": "Can I pay a {C} cost with green mana? Can I pay a {1} cost with green mana?",
+    "rules": ["107.4b", "107.4c"],
+    "reference_answer": "A C cost specifically requires colorless mana. A generic 1 cost can be paid with green mana."
+  }
+]
