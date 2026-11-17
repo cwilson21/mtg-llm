@@ -1,0 +1,27 @@
+{
+  "rules": {
+    "source": "https://media.wizards.com/2026/downloads/MagicCompRules%2020261106.txt",
+    "effective": "November 6, 2026",
+    "source_sha256": "524f5195a1e5f54bb13c735edf399ac717a4458e2713f398d1a3e6877186b829",
+    "corpus_sha256": "3464ebe6e50910d27b5ec466b0cbec9a62a3e07a6c348337abe796ff830b53ef",
+    "numbered_rules": 3183,
+    "glossary_entries": 744
+  },
+  "cards": {
+    "snapshot": "all-cards-20261117102242.jsonl.gz",
+    "source_sha256": "c9b84ae07a582bd0f9324bc45bd170a86aedcf4bc73c806bf01f6971c331d2c5",
+    "printing_rows": 552011,
+    "english_rows_with_oracle_id": 117392,
+    "unique_oracle_cards": 39289
+  },
+  "counts": {
+    "train": 500,
+    "validation": 132
+  },
+  "authored_scenarios": 38,
+  "new_application_scenarios": 197,
+  "files": {
+    "rank32-train.jsonl": "8505382a620f11b26367ecf27c03b16c65646b223c67d447c76e1efe4ecf04a5",
+    "rank32-validation.jsonl": "731b40297262d0ffd715642fbdd38e03e43646847204bede170aa513b626a45b"
+  }
+}

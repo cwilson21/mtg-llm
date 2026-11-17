@@ -2,7 +2,7 @@
 
 Train a local language model on the Magic Comprehensive Rules and Scryfall card text, ask questions with retrieved rules and Oracle text, and evaluate answers against an expected-answer suite.
 
-The current model is `Qwen/Qwen3-4B-Instruct-2507` with bfloat16 LoRA training. The training pipeline has completed a three-step CUDA smoke run on an NVIDIA RTX 4060 Ti with 16 GB of VRAM. A full training run's ruling accuracy needs evaluation.
+The current model is `Qwen/Qwen3-4B-Instruct-2507` with bfloat16 LoRA training. Fresh rank-32 training passed a two-epoch CUDA check on an NVIDIA RTX 4060 Ti with 16 GB of VRAM, including evaluation and usable checkpoints after both epochs. Accuracy of the expanded rank-32 experiment remains to be measured.
 
 The Linux target is **Ubuntu 26.04 LTS**. Canonical lists standard security maintenance through May 2031, and NVIDIA's CUDA Linux installation guide includes Ubuntu 26.04 for amd64 systems. Linux runtime validation is pending. [Ubuntu lifecycle](https://ubuntu.com/about/release-cycle?product=ubuntu&release=ubuntu&version=26.04+LTS), [NVIDIA Linux support](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)
 
@@ -168,6 +168,10 @@ The corpus stage uses next-token prediction over rulebook and card text. The sup
 python -m unittest discover -s tests -v
 ```
 
-Eleven regression tests cover answer parsing, complete assistant-only labels, dataset and scenario-group overlap, reserved evaluation questions with appended choices, semantic cache validation, chunk deduplication, subrule provenance, cached lookup behavior and memory-conscious generation.
+Regression tests cover answer parsing, complete assistant-only labels, dataset and scenario-group overlap, reserved evaluation questions with appended choices, semantic cache validation, chunk deduplication, subrule provenance, cached lookup behavior, memory-conscious generation, fresh adapter settings, checkpoint provenance, and multiple-choice target consistency.
 
 On the existing 30-question development suite, expected supporting references present in retrieved context increased from 29 of 50 to 40 of 50. The earlier search returned eight individual passages. The new search allows up to twelve bounded blocks, including related subrules. This measures evidence coverage on the development questions. Full answer accuracy after supervised training still needs a new evaluation run. The three-step supervised smoke adapter still answered a zero-toughness question incorrectly despite receiving the relevant rules.
+
+## Fresh rank-32 training
+
+The [rank-32 experiment guide](qa/RANK32.md) provides Windows and Ubuntu commands for a fresh Qwen3-4B-Instruct-2507 adapter, rank 32 across attention and MLP linear projections, and the expanded 500/132 question-answer split. Every supervised epoch saves a usable checkpoint and evaluates validation loss. It also explains how to compare each epoch's ruling accuracy using the smoke runner.

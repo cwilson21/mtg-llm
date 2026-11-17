@@ -86,9 +86,11 @@ def train(args):
     import torch
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model
     from transformers import DataCollatorForLanguageModeling, Trainer, TrainingArguments, set_seed
+    from training import EpochArtifacts, lora_options, training_record
 
     if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
         raise ValueError(f"{args.output} already contains files. Choose a fresh --output directory.")
+    options = lora_options(args)
     if args.with_cards and not DATABASE.is_file():
         raise ValueError("Card index is missing. Run cards.py prepare first.")
     index = RuleIndex()
@@ -152,8 +154,7 @@ def train(args):
         model = PeftModel.from_pretrained(model, args.from_adapter, is_trainable=True)
     else:
         model = get_peft_model(model, LoraConfig(
-            task_type=TaskType.CAUSAL_LM, r=8, lora_alpha=16, lora_dropout=0.05,
-            target_modules=["q_proj", "v_proj"],
+            task_type=TaskType.CAUSAL_LM, lora_dropout=0.05, **options,
         ))
     model.print_trainable_parameters()
     settings = TrainingArguments(
@@ -174,7 +175,9 @@ def train(args):
         dataloader_num_workers=0,
         dataloader_pin_memory=device.type == "cuda",
         logging_steps=10 if args.steps < 0 else 1,
-        save_strategy="no",
+        save_strategy="epoch" if evaluation else "no",
+        eval_accumulation_steps=1,
+        prediction_loss_only=True,
         report_to="none",
         seed=42,
         eval_strategy="epoch" if evaluation else "no",
@@ -184,27 +187,30 @@ def train(args):
         collator = DataCollatorForSeq2Seq(tokenizer, label_pad_token_id=-100)
     else:
         collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    adapter_config = model.peft_config["default"]
+    targets = adapter_config.target_modules
+    record = {
+        "base_model": base_model, "revision": revision, "rules": index.manifest,
+        "cards": card_manifest, "parent_adapter": str(args.from_adapter) if parent else None,
+        "tokens": (sum(len(row["input_ids"]) for row in blocks) if supervised_record
+                   else len(token_ids) + card_tokens + len(mana_tokens)),
+        "sequence_length": args.length,
+        "mana_reference_sha256": hashlib.sha256(MANA_GUIDE.encode("utf-8")).hexdigest(),
+        "training_mode": args.command, "supervised": supervised_record,
+        "lora": {"rank": adapter_config.r, "alpha": adapter_config.lora_alpha,
+                 "target_modules": sorted(targets) if isinstance(targets, set) else targets},
+        "learning_rate": args.learning_rate, "requested_epochs": args.epochs,
+        "save_strategy": settings.save_strategy.value, "eval_strategy": settings.eval_strategy.value,
+        "precision": str(dtype), "seed": 42,
+    }
     trainer = Trainer(
         model=model, args=settings, train_dataset=blocks, processing_class=tokenizer,
         data_collator=collator, eval_dataset=evaluation,
+        callbacks=[EpochArtifacts(record)],
     )
     trainer.train()
     trainer.save_model(str(args.output))
-    write_text(args.output / "run.json", json.dumps({
-        "base_model": base_model, "revision": revision, "rules": index.manifest,
-        "cards": card_manifest, "parent_adapter": str(args.from_adapter) if parent else None,
-        "tokens": (
-            sum(len(row["input_ids"]) for row in blocks) if supervised_record
-            else len(token_ids) + card_tokens + len(mana_tokens)
-        ),
-        "sequence_length": args.length,
-        "mana_reference_sha256": hashlib.sha256(MANA_GUIDE.encode("utf-8")).hexdigest(),
-        "optimizer_steps": trainer.state.global_step,
-        "training_mode": args.command, "supervised": supervised_record,
-        "validation_metrics": next(
-            (entry for entry in reversed(trainer.state.log_history) if "eval_loss" in entry), None,
-        ),
-    }, indent=2))
+    write_text(args.output / "run.json", json.dumps(training_record(record, trainer.state), indent=2))
     print(f"Adapter saved to {args.output.resolve()}")
 
 
@@ -342,12 +348,18 @@ def main():
     sft.add_argument("--eval-file", type=Path, default=Path("qa/validation.jsonl"))
     sft.add_argument("--validate", action="store_true", help="Validate datasets without loading a model.")
     sft.add_argument("--from-adapter", type=Path)
+    sft.add_argument("--fresh-base", action="store_true", help="Reject --from-adapter; initialize a new adapter.")
     sft.add_argument("--output", type=Path, default=Path("runs/qwen3-sft"))
     sft.add_argument("--length", type=int, default=2048, choices=(512, 1024, 2048))
     sft.add_argument("--epochs", type=int, default=1)
     sft.add_argument("--steps", type=int, default=-1)
     sft.add_argument("--learning-rate", type=float, default=2e-5)
     sft.set_defaults(with_cards=False)
+    for cmd in (training, sft):
+        cmd.add_argument("--lora-rank", type=int, help="Fresh adapter rank (SFT: 32; corpus: 8).")
+        cmd.add_argument("--lora-alpha", type=int, help="Fresh adapter scaling alpha (default: twice rank).")
+        cmd.add_argument("--lora-targets", choices=("all-linear", "qv"),
+                         help="Fresh adapter layers (SFT: all-linear; corpus: qv).")
     ask = commands.add_parser("ask", help="Ask a rules question with retrieved passages.")
     ask.add_argument("question")
     ask.add_argument("--card", action="append", default=[], help="Include an exact card or face name. Repeat as needed.")
@@ -363,6 +375,12 @@ def main():
         parser.error("Use --epochs >= 1 and either --steps -1 or a positive step count.")
     if args.command in {"train", "sft"} and args.from_adapter and args.model != BASE_MODEL:
         parser.error("--from-adapter supplies the base model. Omit --model.")
+    if args.command in {"train", "sft"}:
+        from training import lora_options
+        try:
+            lora_options(args)
+        except ValueError as error:
+            parser.error(str(error))
     try:
         if args.command == "doctor":
             doctor()
