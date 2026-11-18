@@ -10,6 +10,8 @@ The proposed future 12B profile requires 4-bit QLoRA support. The code currently
 
 ## Install
 
+Moving an existing Windows installation? Follow the [headless Ubuntu migration guide](MIGRATING.md), including preservation of local adapters and data that Git does not contain.
+
 Use Python 3.13 and a compatible NVIDIA driver. Check GPU availability with `nvidia-smi`.
 
 On Windows, open PowerShell in the repository directory.
