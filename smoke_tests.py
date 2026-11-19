@@ -3,6 +3,7 @@
 import argparse
 from contextlib import nullcontext
 from datetime import datetime, timezone
+from functools import partial
 import hashlib
 import html
 import json
@@ -23,16 +24,21 @@ def load_suite(path):
     if not suite.get("cases"):
         raise ValueError("The question file must have a nonempty cases list.")
     for case in suite["cases"]:
-        for field in ("id", "group", "question", "choices", "correct_choice", "expected_answer", "rules", "cards"):
+        deck_review = case.get("format") == "deck_review"
+        fields = ("id", "group", "question", "expected_answer", "rules", "cards")
+        if not deck_review:
+            fields += ("choices", "correct_choice")
+        for field in fields:
             if field not in case:
                 raise ValueError(f"A case is missing {field!r}.")
         if not isinstance(case["id"], str) or not case["id"] or case["id"] in seen:
             raise ValueError(f"Case IDs must be unique nonempty strings: {case['id']!r}")
         seen.add(case["id"])
-        if set(case["choices"]) != set("ABCD") or case["correct_choice"] not in case["choices"]:
+        choices = case.get("choices", {})
+        if not deck_review and (set(choices) != set("ABCD") or case["correct_choice"] not in choices):
             raise ValueError(f"{case['id']}: provide choices A-D and a correct_choice.")
         if not all(isinstance(text, str) and text.strip() for text in (
-            case["group"], case["question"], case["expected_answer"], *case["choices"].values()
+            case["group"], case["question"], case["expected_answer"], *choices.values()
         )):
             raise ValueError(f"{case['id']}: question, group, answer and choices must contain text.")
         if not all(isinstance(items, list) and all(isinstance(item, str) for item in items)
@@ -42,6 +48,8 @@ def load_suite(path):
 
 
 def question_prompt(case):
+    if case.get("format") == "deck_review":
+        return case["question"]
     choices = "\n".join(f"{letter}. {case['choices'][letter]}" for letter in "ABCD")
     return (
         case["question"] + "\n\n" + choices
@@ -52,6 +60,8 @@ def question_prompt(case):
 
 
 def score_answer(case, answer):
+    if case.get("format") == "deck_review":
+        return {"answer": answer, "status": "manual_review", "explanation_review": "pending"}
     # Accept an answer marker or an unambiguous first-line choice such as D. No.
     # Do not infer a choice by searching the explanation or expected answer.
     match = re.match(
@@ -71,7 +81,7 @@ def score_answer(case, answer):
 
 
 def summary(rows, label):
-    results = [row[label] for row in rows if label in row]
+    results = [row[label] for row in rows if label in row and row.get("format") != "deck_review"]
     return {
         "answered": len(results),
         "correct_choice": sum(result["status"] == "correct_choice" for result in results),
@@ -93,6 +103,7 @@ def report_html(report):
         "<h1>MTG smoke test results</h1>",
         f"<p>Adapter {escape(report['adapter'])}. Completed {len(report['cases'])} "
         f"of {report['selected_cases']} questions.</p>",
+        f"<p>{escape(report['context'])}</p>" if "context" in report else "",
         "<p>The automatic score checks the selected answer letter. Review the explanation and citations "
         "against the expected answer. A matching citation alone does not validate the reasoning.</p>",
         "<table><tr><th>Model</th><th>Correct choice</th><th>Wrong choice</th><th>Unparsed</th></tr>",
@@ -104,10 +115,12 @@ def report_html(report):
         )
     pieces.append("</table>")
     for row in report["cases"]:
+        choices = row.get("choices", {})
+        heading = f"Expected {row['correct_choice']}" if choices else "Review rubric"
         pieces.extend([
-            f"<article><h2>{escape(row['id'])}</h2><p>{escape(row['question'])}</p>",
-            "<ul>" + "".join(f"<li>{letter}. {escape(row['choices'][letter])}</li>" for letter in "ABCD") + "</ul>",
-            f"<h3>Expected {row['correct_choice']}</h3><p>{escape(row['expected_answer'])}</p>",
+            f"<article><h2>{escape(row['id'])}</h2><pre>{escape(row['question'])}</pre>",
+            "<ul>" + "".join(f"<li>{letter}. {escape(choices[letter])}</li>" for letter in "ABCD") + "</ul>" if choices else "",
+            f"<h3>{escape(heading)}</h3><p>{escape(row['expected_answer'])}</p>",
             f"<p>Reference rules {escape(', '.join(row['rules']) or 'none')}. "
             f"Retrieved rules {escape(', '.join(row['retrieved_rules']))}. "
             f"Cards {escape(', '.join(row['retrieved_cards']) or 'none')}.</p>",
@@ -128,6 +141,7 @@ def save_report(report, output):
         label: summary(report["cases"], label) for label in ("adapter", "base")
         if label == "adapter" or report["compare_base"]
     }
+    report["deck_reviews"] = sum(row.get("format") == "deck_review" for row in report["cases"])
     output.mkdir(parents=True, exist_ok=True)
     write_text(output / "results.json", json.dumps(report, ensure_ascii=False, indent=2))
     write_text(output / "results.html", report_html(report))
@@ -149,6 +163,7 @@ def run(args, suite, cases, index, card_index):
     if not (args.adapter / "run.json").is_file():
         raise ValueError(f"{args.adapter} has no run.json yet. Run this after training finishes.")
     model, tokenizer, record = load_for_answers(args)
+    closed_book = args.closed_book
     report = {
         "suite": suite["suite"], "suite_sha256": hashlib.sha256(args.questions.read_bytes()).hexdigest(),
         "started_utc": datetime.now(timezone.utc).isoformat(),
@@ -156,29 +171,38 @@ def run(args, suite, cases, index, card_index):
         "rules": index.manifest, "cards": card_index.manifest if card_index else None,
         "expected_rules_edition": suite.get("rules_edition"),
         "compare_base": args.compare_base, "selected_cases": len(cases),
-        "context": "Application lookup with retrieved rules, card text and mana helpers",
-        "retrieval": index.retrieval_info(),
+        "closed_book": closed_book,
+        "context": ("Closed book with Oracle text for named cards"
+                    if closed_book else "Application lookup with retrieved rules, card text and mana helpers"),
+        "retrieval": None if closed_book else index.retrieval_info(),
         "cases": [],
     }
+    if args.deck_cases:
+        report["deck_suite_sha256"] = hashlib.sha256(args.deck_cases.read_bytes()).hexdigest()
     if index.manifest["effective"] != suite.get("rules_edition"):
         print("The imported rules edition differs from the suite. Review expected answers for this edition.")
     save_report(report, args.output)
     for position, case in enumerate(cases, 1):
+        deck_review = case.get("format") == "deck_review"
         cards = card_index.for_question(case["question"], case["cards"]) if card_index and case["cards"] else []
-        hits = index.search(case["question"], cards=cards)
+        hits = [] if closed_book or deck_review else index.search(case["question"], cards=cards)
         prompt = question_prompt(case)
+        generate = partial(reply, closed_book=closed_book or deck_review)
+        if deck_review:
+            generate = partial(generate, max_new_tokens=850)
         row = {
             **case, "retrieved_rules": retrieved_rule_ids(hits),
             "retrieved_cards": [card["name"] for card in cards],
             "expected_rules_retrieved": [rule for rule in case["rules"] if rule in retrieved_rule_ids(hits)],
-            "computed_costs": computed_costs(case["question"], cards),
+            "computed_costs": [] if closed_book or deck_review else computed_costs(case["question"], cards),
         }
         if args.compare_base:
             with model.disable_adapter():
-                row["base"] = score_answer(case, reply(model, tokenizer, prompt, hits, cards))
-        row["adapter"] = score_answer(case, reply(model, tokenizer, prompt, hits, cards))
+                row["base"] = score_answer(case, generate(model, tokenizer, prompt, hits, cards))
+        row["adapter"] = score_answer(case, generate(model, tokenizer, prompt, hits, cards))
         report["cases"].append(row)
-        report["retrieval"] = index.retrieval_info()
+        if not closed_book:
+            report["retrieval"] = index.retrieval_info()
         save_report(report, args.output)
         print(f"{position}/{len(cases)} {case['id']}: {row['adapter']['status']}", flush=True)
     print(json.dumps(report["summary"], indent=2))
@@ -190,15 +214,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adapter", type=Path, default=Path("runs/qwen3-full"))
     parser.add_argument("--questions", type=Path, default=Path(__file__).with_name("smoke_questions.json"))
+    parser.add_argument("--deck-cases", type=Path, help="Add open-ended deck reviews to this smoke run.")
     parser.add_argument("--output", type=Path, default=Path("runs/post-training-smoke"))
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--group", action="append", help="Select a group. Repeat to include multiple groups.")
     parser.add_argument("--limit", type=int, help="Run only the first N selected questions.")
     parser.add_argument("--compare-base", action="store_true", help="Also run the original model with identical context.")
+    parser.add_argument("--closed-book", action="store_true",
+                        help="Supply named card text and printed characteristics without rules or mana hints.")
     parser.add_argument("--validate", action="store_true", help="Check the suite and local data without loading the model.")
     parser.add_argument("--rescore", type=Path, help="Rescore an existing results.json without generating new answers.")
     args = parser.parse_args()
     args.model = BASE_MODEL
+    args.load_in_4bit = False  # The shared loader reads quantization from the adapter's training record.
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive.")
     try:
@@ -218,6 +246,12 @@ def main():
             print(f"Open {(args.output / 'results.html').resolve()}")
             return
         suite = load_suite(args.questions)
+        if args.deck_cases:
+            deck_cases = load_suite(args.deck_cases)["cases"]
+            ids = {case["id"] for case in suite["cases"]}
+            if any(case.get("format") != "deck_review" or case["id"] in ids for case in deck_cases):
+                raise ValueError("Deck reviews must have unique IDs across both suites.")
+            suite["cases"] = deck_cases + suite["cases"]
         groups = {case["group"] for case in suite["cases"]}
         if args.group and set(args.group) - groups:
             raise ValueError(f"Choose groups from {', '.join(sorted(groups))}.")

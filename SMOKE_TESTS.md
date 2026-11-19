@@ -40,6 +40,21 @@ This loads the base and adapter together once and disables the adapter for each 
 
 ## Read the scores
 
+To run the Zimone Commander deck review alongside the standard closed-book
+questions, run this from the repository root.
+
+```bash
+HF_HOME="$PWD/.cache/huggingface" HF_HUB_OFFLINE=1 \
+  .venv/bin/python smoke_tests.py --adapter runs/falcon3-10b-commander \
+  --closed-book --deck-cases smoke_deck_questions.json \
+  --output runs/falcon3-10b-commander-smoke
+```
+
+The deck fixture contains the commander and main deck from the pinned
+Archidekt export. It omits the sideboard and maybeboard. The report includes
+a separate deck review rubric. The multiple-choice total covers the usual
+30 questions. Use `--group deckbuilding` to run only the deck review.
+
 - `correct_choice` means the generated answer selected the expected letter.
 - `wrong_choice` means it selected another letter.
 - `unparsed` means the response did not begin with a recognizable single choice. The grader accepts `ANSWER: A`, a standalone `A`, and a first line such as `A. Explanation`. Other formats need manual review.

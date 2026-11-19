@@ -25,7 +25,10 @@ def read_examples(path, index):
         ):
             raise ValueError(f"{path}:{line_number}: provide id, question and answer strings.")
         references = row.get("rules")
-        if not isinstance(references, list) or not references or any(
+        source = row.get("source")
+        sourced_context = (row.get("track") in {"commander-brackets", "full-deck-review"}
+                           and isinstance(source, str) and source.strip())
+        if not isinstance(references, list) or (not references and not sourced_context) or any(
             not isinstance(rule, str) or rule not in index.by_id for rule in references
         ):
             raise ValueError(f"{row['id']}: supply valid numbered rule references.")
@@ -57,7 +60,7 @@ def load_datasets(train_file, eval_file, index):
         raise ValueError("A scenario group appears in both training and validation.")
     reserved = set()
     root = Path(__file__).parent
-    for name in ("smoke_questions.json", "evaluation.json", "evaluation_cards.json"):
+    for name in ("smoke_questions.json", "smoke_deck_questions.json", "evaluation.json", "evaluation_cards.json"):
         data = json.loads((root / name).read_text(encoding="utf-8"))
         cases = data["cases"] if isinstance(data, dict) else data
         reserved.update(normalize_question(case["question"]) for case in cases)
@@ -76,18 +79,29 @@ def load_datasets(train_file, eval_file, index):
     return training, validation
 
 
+def chat_template_options(tokenizer):
+    template = getattr(tokenizer, "chat_template", None)
+    return {"enable_thinking": False} if isinstance(template, str) and "enable_thinking" in template else {}
+
+
 def encode_example(row, index, tokenizer, message_builder, cards, max_length):
     # Teacher evidence is curated in the training data. Evaluation retrieval never
     # receives an expected answer or reference list.
     hits = [index.by_id[reference] for reference in row["rules"]]
     messages = message_builder(row["question"], hits, cards)
-    prompt = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+    options = chat_template_options(tokenizer)
+    prompt = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, **options)
+    assistant = {"role": "assistant", "content": row["answer"]}
     full = tokenizer.apply_chat_template(
-        messages + [{"role": "assistant", "content": row["answer"]}],
-        tokenize=True, add_generation_prompt=False,
+        messages + [assistant], tokenize=True, add_generation_prompt=False, **options,
     )
+    if full[:len(prompt)] != prompt and [message["role"] for message in messages] == ["system", "user"]:
+        # NeMo's template includes the system text only when the user turn is last.
+        # Fold it into that turn and verify the result against the inference prompt.
+        user = {"role": "user", "content": messages[0]["content"] + "\n\n" + messages[1]["content"]}
+        full = tokenizer.apply_chat_template([user, assistant], tokenize=True, add_generation_prompt=False, **options)
     if full[:len(prompt)] != prompt:
-        raise ValueError("The chat template's training and generation prefixes differ.")
+        raise ValueError(f"{row['id']}: the chat template's training and generation prefixes differ.")
     if len(full) > max_length:
         raise ValueError(f"{row['id']} needs {len(full)} tokens. Increase --length to preserve the full answer.")
     if len(full) <= len(prompt):

@@ -44,14 +44,14 @@ python rules.py index
 python rules.py lookup "117.4"
 ```
 
-Download the requested Scryfall snapshot and import its local path.
+Download and import the latest Scryfall All Cards gzip-compressed JSONL snapshot.
 
 ```bash
-python cards.py prepare --file /path/to/all-cards-20261117102242.jsonl.gz
+python cards.py prepare
 python cards.py lookup "Walking Ballista"
 ```
 
-The snapshot contains 552,011 printing records. Importing selects 117,392 English records with Oracle IDs and deduplicates them into 39,289 cards. It preserves all card faces and selects the latest released English printing for each Oracle ID, with printing ID as a tie-breaker.
+To rebuild from a specific snapshot, use `python cards.py prepare --file /path/to/all-cards.jsonl.gz`. The importer selects English records with Oracle IDs, preserves all card faces, and selects the latest released English printing for each Oracle ID, with printing ID as a tie-breaker.
 
 Card training text includes names, mana costs, types, Oracle text, power, toughness, loyalty, defense, mana values and computed X-cost examples. Training also replays rules and mana guidance. Data imports record their source hashes for reproducibility.
 
@@ -61,7 +61,7 @@ The importer writes the numbered rules and glossary to `data/passages.json`, alo
 
 The default source is the November 6, 2026 English TXT. The supplied June 6, 2025 PDF is a historical edition. The training examples and tests in this repository target the imported 2026 edition. [June 2025 rules PDF](https://media.wizards.com/2025/downloads/MagicCompRules%2020250606.pdf)
 
-[Official rules downloads](https://magic.wizards.com/en/rules), [Scryfall snapshot](https://data.scryfall.io/all-cards/all-cards-20261117102242.jsonl.gz)
+[Official rules downloads](https://magic.wizards.com/en/rules), [Scryfall bulk data](https://scryfall.com/docs/api/bulk-data)
 
 ## Rule retrieval
 
@@ -80,6 +80,50 @@ Embedding and reranking use the CPU, leaving GPU memory for the language model. 
 The JSONL archive is the import format. Runtime card lookup already uses a read-only SQLite database with parameterized queries. The application supplies exact Oracle text through named card lookups.
 
 SQLite suits this local application. MySQL becomes useful for a centrally hosted card service, several applications or shared database administration. A future MySQL backend can expose the same typed lookup functions. Updating card data then updates lookup results without retraining the model. SQL generation is separate from teaching MTG rule application. [SQLite deployment guidance](https://www.sqlite.org/whentouse.html)
+
+## Train Falcon3 10B
+
+With the rules and card index prepared, use the project environment to run a
+three-step QLoRA smoke test on the reviewed MTG examples.
+
+```bash
+python -m pip install bitsandbytes==0.50.2
+python mtg.py sft --model tiiuae/Falcon3-10B-Instruct --load-in-4bit \
+    --train-file qa/rank32-train.jsonl --eval-file qa/rank32-validation.jsonl \
+    --lora-rank 16 --steps 3 --output runs/falcon3-10b-smoke
+```
+
+For a full first epoch, omit `--steps 3` and set `--output runs/falcon3-10b-sft`.
+Use `python mtg.py evaluate --adapter runs/falcon3-10b-sft --report runs/falcon3-10b-eval.json`
+to compare the base and tuned answers.
+
+## Evaluate Mistral NeMo 12B
+
+With the rules and card index prepared, install the optional 4-bit inference
+dependency in the project environment and run the evaluation on CUDA.
+
+```bash
+python -m pip install bitsandbytes==0.50.2
+python mtg.py evaluate --model mistralai/Mistral-Nemo-Instruct-2407 \
+    --load-in-4bit --report runs/mistral-nemo-12b-nf4.json
+```
+
+The same model and 4-bit flags work with `mtg.py ask` for individual questions.
+The first run downloads the base weights from Hugging Face.
+
+To fine-tune a fresh NeMo adapter on the reviewed MTG questions and answers,
+start with a three-step QLoRA smoke run.
+
+```bash
+python mtg.py sft --model mistralai/Mistral-Nemo-Instruct-2407 --load-in-4bit \
+    --train-file qa/rank32-train.jsonl --eval-file qa/rank32-validation.jsonl \
+    --lora-rank 16 --steps 3 --output runs/nemo-12b-smoke
+```
+
+For a full first pass, omit `--steps 3` and use `--output runs/nemo-12b-sft`.
+Then run `python mtg.py evaluate --adapter runs/nemo-12b-sft --report runs/nemo-12b-sft-eval.json`
+to compare the base and tuned answers. The adapter metadata supplies the base
+model and 4-bit loading setting.
 
 ## Train
 

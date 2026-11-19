@@ -4,18 +4,22 @@ import argparse
 from contextlib import closing
 import gzip
 import hashlib
+from http.client import HTTPException
 import json
 from pathlib import Path
 import re
+from shutil import copyfileobj
 import sqlite3
 import sys
 from tempfile import TemporaryDirectory
 import unicodedata
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from mana import cost_explanation, mana_value
 
 
-SNAPSHOT = "all-cards-20261117102242.jsonl.gz"
+ALL_CARDS_URL = "https://api.scryfall.com/bulk-data/all-cards"
 DATABASE = Path("data/cards.sqlite3")
 WORD = re.compile(r"\w+(?:'\w+)*")
 CARD_FIELDS = ("name", "mana_cost", "cmc", "type_line", "oracle_text", "power", "toughness", "loyalty", "defense")
@@ -28,6 +32,27 @@ def words(text):
 
 def key(text):
     return " ".join(words(text))
+
+
+def fetch_latest_cards():
+    headers = {"User-Agent": "mtg-llm/1.0", "Accept": "application/json"}
+    with urlopen(Request(ALL_CARDS_URL, headers=headers), timeout=30) as response:
+        metadata = json.load(response)
+    url = metadata.get("jsonl_download_uri") if isinstance(metadata, dict) else None
+    if not isinstance(url, str):
+        raise ValueError("Scryfall did not provide an All Cards JSONL download URL.")
+    location = urlsplit(url)
+    filename = location.path.rsplit("/", 1)[-1]
+    if location.scheme != "https" or not filename.endswith(".jsonl.gz"):
+        raise ValueError("Expected an HTTPS link to Scryfall's All Cards .jsonl.gz archive.")
+
+    DATABASE.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix="scryfall-", dir=DATABASE.parent) as temporary:
+        archive = Path(temporary) / filename
+        headers["Accept"] = "application/gzip, */*;q=0.8"
+        with urlopen(Request(url, headers=headers), timeout=60) as response, archive.open("wb") as handle:
+            copyfileobj(response, handle)
+        return import_cards(archive, DATABASE)
 
 
 def import_cards(source, destination=DATABASE):
@@ -65,6 +90,8 @@ def import_cards(source, destination=DATABASE):
                     card["oracle_id"] = obj["oracle_id"]
                     card["layout"] = obj.get("layout")
                     card["keywords"] = obj.get("keywords", [])
+                    if "game_changer" in obj:
+                        card["game_changer"] = obj["game_changer"]
                     if obj.get("card_faces"):
                         card["faces"] = [
                             {field: face[field] for field in CARD_FIELDS if field in face}
@@ -149,7 +176,7 @@ def open_cards(path=DATABASE):
     return closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True))
 
 
-def format_card(card):
+def format_card(card, *, include_mana_hints=True):
     def fields(record):
         lines = []
         for label, field in (
@@ -158,6 +185,8 @@ def format_card(card):
         ):
             if record.get(field):
                 lines.append(f"{label}: {record[field]}")
+        if not include_mana_hints:
+            return lines
         if "cmc" in record:
             lines.append(f"Scryfall mana value (cmc): {record['cmc']}")
         if record.get("mana_cost"):
@@ -182,22 +211,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     prepare = commands.add_parser("prepare")
-    prepare.add_argument("--file", type=Path, default=Path.home() / "Downloads" / SNAPSHOT)
+    prepare.add_argument("--file", type=Path, help="Import a local .jsonl.gz snapshot instead of downloading the latest.")
     lookup = commands.add_parser("lookup")
     lookup.add_argument("name")
     args = parser.parse_args()
     try:
         if args.command == "prepare":
-            if not args.file.is_file():
-                raise ValueError(f"Archive not found at {args.file}. Pass --file with the downloaded JSONL.GZ path.")
-            print(json.dumps(import_cards(args.file), indent=2))
+            manifest = fetch_latest_cards() if args.file is None else import_cards(args.file)
+            print(json.dumps(manifest, indent=2))
         else:
             with open_cards() as db:
                 matches = CardIndex(db).get(args.name)
             if not matches:
                 raise ValueError(f"No card or face with the name {args.name!r}.")
             print("\n\n".join(map(format_card, matches)))
-    except (OSError, ValueError, sqlite3.Error) as error:
+    except (OSError, ValueError, EOFError, HTTPException, sqlite3.Error) as error:
         parser.exit(1, f"Error: {error}\n")
 
 
